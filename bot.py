@@ -2,7 +2,7 @@ import asyncio
 import re
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.errors import FloodWait
+from pyrogram.errors import FloodWait, PeerIdInvalid, ChannelInvalid
 from config import Config
 from database import db
 
@@ -15,23 +15,35 @@ bot = Client(
 
 user_states = {}
 
-def get_chat_and_topic(link: str):
-    # Parses t.me/c/chat_id/topic_id/msg_id or t.me/chat_name/msg_id
+def parse_link(link: str):
+    """
+    Parses a Telegram link. Returns a dict with chat_id, message_id.
+    """
+    if "t.me/+" in link or "joinchat" in link:
+        return {"error": "Invite links (t.me/+) are NOT allowed. Send a public @username or a direct message link."}
+        
     if "t.me/c/" in link:
+        # Private chat message link: t.me/c/123456789/100
         parts = link.split("/")
-        chat_id = int("-100" + parts[4])
-        return chat_id
+        try:
+            chat_id = int("-100" + parts[4])
+            msg_id = int(parts[-1])
+            return {"chat_id": chat_id, "msg_id": msg_id}
+        except:
+            return {"error": "Invalid private message link format."}
+            
     elif "t.me/" in link:
+        # Public chat message link: t.me/username/100
         parts = link.split("/")
-        chat_username = parts[3]
-        return chat_username
-    return None
-
-def extract_msg_id(link: str):
-    try:
-        return int(link.split("/")[-1])
-    except:
-        return None
+        try:
+            chat_id = parts[3]
+            msg_id = int(parts[-1])
+            return {"chat_id": chat_id, "msg_id": msg_id}
+        except:
+            # Maybe just a username?
+            return {"chat_id": parts[3], "msg_id": None}
+            
+    return {"error": "Unrecognized link format."}
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message):
@@ -88,8 +100,18 @@ async def forward_cmd(client, message):
     if not await db.is_user_authorized(message.from_user.id):
         return await message.reply_text("You are not authorized.")
     
-    user_states[message.from_user.id] = {"step": "source_link"}
-    await message.reply_text("Send me the link to the SOURCE chat (or a message in it).")
+    user_states[message.from_user.id] = {"step": "dest_links"}
+    msg = (
+        "**STEP 1: Destination Chat(s)**\n\n"
+        "Bhejein us group ya channel ka link jahan messages forward karne hain.\n\n"
+        "⚠️ **IMPORTANT:**\n"
+        "1. Bot wahan **ADMIN** hona chahiye.\n"
+        "2. **Invite links (t.me/+) KAAM NAHI KARENGE.**\n"
+        "3. Private chat ke liye us chat ke kisi bhi **MESSAGE KA LINK** bhejein (jaise: `https://t.me/c/123456789/5`).\n"
+        "4. Public chat ke liye direct link bhejein (jaise: `https://t.me/movies`).\n\n"
+        "Agar multiple jagah bhejna hai toh space dekar links dalein."
+    )
+    await message.reply_text(msg)
 
 @bot.on_message(filters.private & ~filters.command("start") & ~filters.command("revoke") & ~filters.command("forward"))
 async def handle_states(client, message):
@@ -99,54 +121,59 @@ async def handle_states(client, message):
     
     state = user_states[user_id]
     
-    if state["step"] == "source_link":
-        state["source_chat"] = get_chat_and_topic(message.text)
-        state["step"] = "dest_links"
-        await message.reply_text("Send me the DESTINATION chat link(s), separated by space.")
-        
-    elif state["step"] == "dest_links":
+    if state["step"] == "dest_links":
         links = message.text.split()
         dests = []
         for link in links:
-            chat = get_chat_and_topic(link)
-            if chat:
-                dests.append(chat)
-        if not dests:
-            return await message.reply_text("Invalid links. Try again.")
+            parsed = parse_link(link)
+            if "error" in parsed:
+                return await message.reply_text(f"Error in link `{link}`: {parsed['error']}\n\nTry /forward again.")
+            dests.append(parsed["chat_id"])
             
         state["dest_chats"] = dests
-        state["step"] = "ask_range"
+        state["step"] = "start_msg"
         
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Specific Range", callback_data="range_yes"),
-             InlineKeyboardButton("Cancel", callback_data="range_cancel")]
-        ])
-        await message.reply_text("Do you want to forward a specific range of messages?", reply_markup=keyboard)
-
+        msg = (
+            "**STEP 2: First Message Link**\n\n"
+            "Ab uss **pehle message ka link** bhejein jahan se forwarding shuru karni hai.\n"
+            "Example: `https://t.me/c/2985458258/1122`"
+        )
+        await message.reply_text(msg)
+        
     elif state["step"] == "start_msg":
-        state["start_id"] = extract_msg_id(message.text)
+        parsed = parse_link(message.text)
+        if "error" in parsed:
+            return await message.reply_text(parsed["error"])
+        if not parsed["msg_id"]:
+            return await message.reply_text("You must send a MESSAGE link, not just a chat link. It should have a number at the end.")
+            
+        state["source_chat"] = parsed["chat_id"]
+        state["start_id"] = parsed["msg_id"]
         state["step"] = "end_msg"
-        await message.reply_text("Now send me the link to the LAST message to forward.")
+        
+        msg = (
+            "**STEP 3: Last Message Link**\n\n"
+            "Ab uss **aakhiri message ka link** bhejein jahan tak forward karna hai.\n"
+            "Agar sirf wahi ek message bhejna hai, toh dobara wahi same link bhej dein."
+        )
+        await message.reply_text(msg)
         
     elif state["step"] == "end_msg":
-        state["end_id"] = extract_msg_id(message.text)
-        await message.reply_text("Starting to forward...")
+        parsed = parse_link(message.text)
+        if "error" in parsed:
+            return await message.reply_text(parsed["error"])
+        if not parsed["msg_id"]:
+            return await message.reply_text("You must send a MESSAGE link. Try again.")
+            
+        if parsed["chat_id"] != state["source_chat"]:
+            return await message.reply_text("The end message must be from the same chat as the start message! Try again.")
+            
+        state["end_id"] = parsed["msg_id"]
+        await message.reply_text("⏳ Starting to forward... Please wait. I will notify you when it's done or if an error occurs.")
+        
+        # Start background task
         asyncio.create_task(process_forward(client, user_id, state))
         del user_states[user_id]
-
-@bot.on_callback_query(filters.regex(r"^range_yes$"))
-async def range_yes(client, callback_query):
-    user_id = callback_query.from_user.id
-    if user_id in user_states:
-        user_states[user_id]["step"] = "start_msg"
-        await callback_query.edit_message_text("Send me the link to the FIRST message to forward.")
-
-@bot.on_callback_query(filters.regex(r"^range_cancel$"))
-async def range_cancel(client, callback_query):
-    user_id = callback_query.from_user.id
-    if user_id in user_states:
-        del user_states[user_id]
-        await callback_query.edit_message_text("Forwarding cancelled.")
 
 async def process_forward(client, user_id, state):
     source = state["source_chat"]
@@ -154,31 +181,45 @@ async def process_forward(client, user_id, state):
     start_id = state.get("start_id")
     end_id = state.get("end_id")
     
-    if not start_id or not end_id:
-        return await client.send_message(user_id, "Error in message IDs.")
+    success_count = 0
+    fail_count = 0
+    
+    # Ensure start_id is smaller than end_id
+    if start_id > end_id:
+        start_id, end_id = end_id, start_id
         
     for msg_id in range(start_id, end_id + 1):
         try:
             msg = await client.get_messages(source, msg_id)
             if msg.empty:
+                fail_count += 1
                 continue
                 
             for dest in dests:
                 try:
                     fwd_msg = await msg.copy(dest)
+                    success_count += 1
                     if msg.pinned_message:
                         try:
                             await fwd_msg.pin()
                         except:
                             pass
                 except FloodWait as e:
-                    await asyncio.sleep(e.value)
-                    fwd_msg = await msg.copy(dest)
+                    await asyncio.sleep(e.value + 1)
+                    await msg.copy(dest)
+                    success_count += 1
                 except Exception as e:
                     print(f"Failed to copy to {dest}: {e}")
+                    fail_count += 1
                     
             await asyncio.sleep(2) # Prevent flood waits
-        except Exception as e:
-            print(f"Error fetching message {msg_id}: {e}")
             
-    await client.send_message(user_id, "✅ Forwarding completed successfully!")
+        except Exception as e:
+            error_msg = str(e)
+            if "PEER_ID_INVALID" in error_msg or "CHANNEL_INVALID" in error_msg:
+                await client.send_message(user_id, f"❌ ERROR: Bot cannot access the chat `{source}`. Make sure it is public OR the bot is an admin there.")
+                return
+            print(f"Error fetching message {msg_id}: {e}")
+            fail_count += 1
+            
+    await client.send_message(user_id, f"✅ **Forwarding Completed!**\n\nSuccessful: {success_count}\nFailed/Skipped: {fail_count}")
