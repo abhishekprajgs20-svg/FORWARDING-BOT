@@ -123,6 +123,17 @@ async def handle_states(client, message):
         ])
         await message.reply_text("Do you want to forward a specific range of messages?", reply_markup=keyboard)
 
+    elif state["step"] == "start_msg":
+        state["start_id"] = extract_msg_id(message.text)
+        state["step"] = "end_msg"
+        await message.reply_text("Now send me the link to the LAST message to forward.")
+        
+    elif state["step"] == "end_msg":
+        state["end_id"] = extract_msg_id(message.text)
+        await message.reply_text("Starting to forward...")
+        asyncio.create_task(process_forward(client, user_id, state))
+        del user_states[user_id]
+
 @bot.on_callback_query(filters.regex(r"^range_yes$"))
 async def range_yes(client, callback_query):
     user_id = callback_query.from_user.id
@@ -136,24 +147,6 @@ async def range_cancel(client, callback_query):
     if user_id in user_states:
         del user_states[user_id]
         await callback_query.edit_message_text("Forwarding cancelled.")
-
-@bot.on_message(filters.private & filters.text)
-async def handle_range(client, message):
-    user_id = message.from_user.id
-    if user_id not in user_states:
-        return
-    
-    state = user_states[user_id]
-    if state["step"] == "start_msg":
-        state["start_id"] = extract_msg_id(message.text)
-        state["step"] = "end_msg"
-        await message.reply_text("Now send me the link to the LAST message to forward.")
-        
-    elif state["step"] == "end_msg":
-        state["end_id"] = extract_msg_id(message.text)
-        await message.reply_text("Starting to forward...")
-        asyncio.create_task(process_forward(client, user_id, state))
-        del user_states[user_id]
 
 async def process_forward(client, user_id, state):
     source = state["source_chat"]
