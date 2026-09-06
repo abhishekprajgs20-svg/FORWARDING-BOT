@@ -188,11 +188,13 @@ async def process_forward(client, user_id, state):
     if start_id > end_id:
         start_id, end_id = end_id, start_id
         
+    last_error = ""
     for msg_id in range(start_id, end_id + 1):
         try:
             msg = await client.get_messages(source, msg_id)
             if msg.empty:
                 fail_count += 1
+                last_error = "Message is empty or deleted."
                 continue
                 
             for dest in dests:
@@ -210,6 +212,7 @@ async def process_forward(client, user_id, state):
                     success_count += 1
                 except Exception as e:
                     print(f"Failed to copy to {dest}: {e}")
+                    last_error = f"Destination Error: {e}"
                     fail_count += 1
                     
             await asyncio.sleep(2) # Prevent flood waits
@@ -220,6 +223,11 @@ async def process_forward(client, user_id, state):
                 await client.send_message(user_id, f"❌ ERROR: Bot cannot access the chat `{source}`. Make sure it is public OR the bot is an admin there.")
                 return
             print(f"Error fetching message {msg_id}: {e}")
+            last_error = f"Source Error: {e}"
             fail_count += 1
             
-    await client.send_message(user_id, f"✅ **Forwarding Completed!**\n\nSuccessful: {success_count}\nFailed/Skipped: {fail_count}")
+    final_text = f"✅ **Forwarding Completed!**\n\nSuccessful: {success_count}\nFailed/Skipped: {fail_count}"
+    if fail_count > 0 and last_error:
+        final_text += f"\n\n**Reason for failure (Last Error):**\n`{last_error}`\n\n*(Check if Bot is Admin in both source and destination chats)*"
+        
+    await client.send_message(user_id, final_text)
